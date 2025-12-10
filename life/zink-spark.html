@@ -1,0 +1,421 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <title>Zinc Spark Simulation</title>
+    <style>
+        body {
+            margin: 0;
+            background: black;
+            overflow: hidden;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            height: 100vh;
+            color: white;
+            font-family: sans-serif;
+        }
+
+        canvas {
+            box-shadow: 0 0 50px rgba(100, 0, 255, 0.2);
+            border-radius: 50%;
+        }
+
+        #controls {
+            position: absolute;
+            top: 20px;
+            left: 20px;
+            background: rgba(0, 0, 0, 0.8);
+            padding: 15px;
+            border-radius: 8px;
+            border: 1px solid rgba(255, 255, 255, 0.1);
+            max-width: 300px;
+        }
+
+        .control-group {
+            margin-bottom: 10px;
+        }
+
+        label {
+            display: block;
+            font-size: 12px;
+            color: #aaa;
+            margin-bottom: 2px;
+        }
+
+        input[type="range"] {
+            width: 100%;
+            cursor: pointer;
+        }
+
+        button {
+            background: #333;
+            color: white;
+            border: 1px solid #555;
+            padding: 5px 10px;
+            cursor: pointer;
+            border-radius: 4px;
+            margin-right: 5px;
+            margin-top: 5px;
+        }
+
+        button:hover {
+            background: #444;
+        }
+
+        #fps {
+            position: absolute;
+            top: 20px;
+            right: 20px;
+            font-family: monospace;
+            color: #666;
+        }
+    </style>
+</head>
+
+<body>
+    <div id="controls">
+        <h3 style="margin: 0 0 10px 0; font-weight: normal; color: #fff;">Zinc Spark</h3>
+        <div class="control-group">
+            <label>Excitability (a)</label>
+            <input type="range" id="p-a" min="0.0" max="0.1" step="0.001" value="0.041">
+        </div>
+        <div class="control-group">
+            <label>Recovery Speed (epsilon)</label>
+            <input type="range" id="p-eps" min="0.0001" max="0.01" step="0.0001" value="0.003">
+        </div>
+        <div class="control-group">
+            <label>Inhibition (b)</label>
+            <input type="range" id="p-b" min="0.0" max="1.5" step="0.01" value="0.9">
+        </div>
+        <div style="border-top: 1px solid #333; padding-top: 10px;">
+            <button id="btn-reset">Clear</button>
+            <button id="btn-spark">Spark</button>
+        </div>
+        <div style="margin-top: 10px; font-size: 12px; color: #888;">
+            Click on the egg to trigger waves.
+        </div>
+    </div>
+    <div id="fps">FPS: 0</div>
+    <canvas id="canvas"></canvas>
+
+    <script>
+        const canvas = document.getElementById('canvas');
+        const gl = canvas.getContext('webgl');
+
+        // Resize handling
+        function resize() {
+            const size = Math.min(window.innerWidth, window.innerHeight) * 0.9;
+            canvas.width = size;
+            canvas.height = size;
+            gl.viewport(0, 0, size, size);
+        }
+        window.addEventListener('resize', resize);
+        resize();
+
+        if (!gl) alert('WebGL not supported');
+
+        // Check float texture support
+        const ext1 = gl.getExtension('OES_texture_float');
+        const ext2 = gl.getExtension('WEBGL_color_buffer_float');
+        if (!ext1) console.warn('Float textures not supported');
+
+        // --- Shaders ---
+
+        const vsSource = `
+            attribute vec2 position;
+            void main() {
+                gl_Position = vec4(position, 0.0, 1.0);
+            }
+        `;
+
+        const simFsSource = `
+            precision mediump float;
+            uniform sampler2D u_tex;
+            uniform vec2 u_res;
+            uniform float u_dt;
+            uniform float u_a;
+            uniform float u_b;
+            uniform float u_eps;
+            uniform vec2 u_click;
+            uniform float u_click_active;
+
+            // Laplacian (diffusion)
+            vec2 laplacian(vec2 uv) {
+                vec2 pixel = 1.0 / u_res;
+                vec2 sum = vec2(0.0);
+                sum += texture2D(u_tex, uv + vec2(pixel.x, 0.0)).xy;
+                sum += texture2D(u_tex, uv - vec2(pixel.x, 0.0)).xy;
+                sum += texture2D(u_tex, uv + vec2(0.0, pixel.y)).xy;
+                sum += texture2D(u_tex, uv - vec2(0.0, pixel.y)).xy;
+                return sum - 4.0 * texture2D(u_tex, uv).xy;
+            }
+
+            void main() {
+                vec2 uv = gl_FragCoord.xy / u_res;
+                vec2 val = texture2D(u_tex, uv).xy;
+                float u = val.x;
+                float v = val.y;
+
+                // FitzHugh-Nagumo Model
+                // du/dt = u - u^3/3 - v + I
+                // But mapped to 0..1 range roughly:
+                // du/dt = u*(1-u)*(u-a) - v
+                // dv/dt = eps*(u - b*v)
+                
+                // Diffusion coefficients
+                float Du = 1.0;
+                float Dv = 0.5; // Inhibitor diffuses slower usually, or faster? 
+                                // In many patterns Dv=0, but for smooth waves Dv > 0 is good.
+                                // Let's use standard: Du=1, Dv=0.
+
+                vec2 lap = laplacian(uv);
+                
+                // Reaction
+                float du = (u * (1.0 - u) * (u - u_a) - v);
+                float dv = u_eps * (u - u_b * v);
+
+                // Interaction (Click)
+                float dist = distance(uv, u_click);
+                if (u_click_active > 0.5 && dist < 0.05) {
+                    u = 1.0;
+                    v = 0.0; // Reset inhibitor to allow immediate firing
+                } else {
+                    u += (du + 0.2 * lap.x) * u_dt; // 0.2 is diffusion strength
+                    v += (dv + 0.1 * lap.y) * u_dt;
+                }
+
+                // Boundary condition (circular mask)
+                vec2 center = uv - 0.5;
+                if (length(center) > 0.5) {
+                    u = 0.0;
+                    v = 0.0;
+                }
+
+                gl_FragColor = vec4(clamp(u, 0.0, 1.0), clamp(v, 0.0, 1.0), 0.0, 1.0);
+            }
+        `;
+
+        const drawFsSource = `
+            precision mediump float;
+            uniform sampler2D u_tex;
+            uniform vec2 u_res;
+
+            void main() {
+                vec2 uv = gl_FragCoord.xy / u_res;
+                float u = texture2D(u_tex, uv).x;
+                
+                // Circular Mask for display
+                vec2 center = uv - 0.5;
+                float dist = length(center);
+                float mask = smoothstep(0.5, 0.495, dist);
+
+                // Visualization: Purple to Orange
+                // Background (u=0): Black/Deep Purple
+                // Active (u=1): Bright Orange/White
+                
+                vec3 colorBg = vec3(0.05, 0.0, 0.1); // Deep purple/black
+                vec3 colorMid = vec3(0.5, 0.0, 0.5); // Purple
+                vec3 colorHigh = vec3(1.0, 0.6, 0.1); // Orange
+                vec3 colorPeak = vec3(1.0, 0.9, 0.8); // White-ish
+
+                vec3 color;
+                if (u < 0.5) {
+                    color = mix(colorBg, colorMid, u * 2.0);
+                } else {
+                    color = mix(colorMid, colorHigh, (u - 0.5) * 2.0);
+                }
+                // Add highlight
+                color = mix(color, colorPeak, pow(u, 4.0));
+
+                gl_FragColor = vec4(color * mask, 1.0);
+            }
+        `;
+
+        // --- WebGL Boilerplate ---
+
+        function createShader(gl, type, source) {
+            const shader = gl.createShader(type);
+            gl.shaderSource(shader, source);
+            gl.compileShader(shader);
+            if (!gl.getShaderParameter(shader, gl.COMPILE_STATUS)) {
+                console.error(gl.getShaderInfoLog(shader));
+                gl.deleteShader(shader);
+                return null;
+            }
+            return shader;
+        }
+
+        function createProgram(gl, vs, fs) {
+            const program = gl.createProgram();
+            const vShader = createShader(gl, gl.VERTEX_SHADER, vs);
+            const fShader = createShader(gl, gl.FRAGMENT_SHADER, fs);
+            gl.attachShader(program, vShader);
+            gl.attachShader(program, fShader);
+            gl.linkProgram(program);
+            if (!gl.getProgramParameter(program, gl.LINK_STATUS)) {
+                console.error(gl.getProgramInfoLog(program));
+                return null;
+            }
+            return program;
+        }
+
+        const simProgram = createProgram(gl, vsSource, simFsSource);
+        const drawProgram = createProgram(gl, vsSource, drawFsSource);
+
+        // Buffers
+        const positionBuffer = gl.createBuffer();
+        gl.bindBuffer(gl.ARRAY_BUFFER, positionBuffer);
+        gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([
+            -1, -1, 1, -1, -1, 1,
+            -1, 1, 1, -1, 1, 1,
+        ]), gl.STATIC_DRAW);
+
+        // Textures & FBOs
+        const texSize = 512;
+        function createTexture() {
+            const tex = gl.createTexture();
+            gl.bindTexture(gl.TEXTURE_2D, tex);
+            // Initialize with zeros to avoid lazy init warning
+            const data = new Float32Array(texSize * texSize * 4);
+            gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, texSize, texSize, 0, gl.RGBA, gl.FLOAT, data);
+
+            // Use NEAREST to avoid "texture not filterable" warnings on devices without OES_texture_float_linear
+            gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST);
+            gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
+            gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+            gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+            return tex;
+        }
+
+        const texA = createTexture();
+        const texB = createTexture();
+        const fbo = gl.createFramebuffer();
+
+        // State
+        let frontTex = texA;
+        let backTex = texB;
+        let clickPos = { x: -1, y: -1 };
+        let isClicking = false;
+
+        // Parameters
+        const params = {
+            a: 0.041,
+            b: 0.9,
+            epsilon: 0.003,
+            dt: 0.8 // Simulation speed
+        };
+        window.params = params; // Expose for console access
+
+        // UI Binding
+        document.getElementById('p-a').addEventListener('input', e => params.a = parseFloat(e.target.value));
+        document.getElementById('p-b').addEventListener('input', e => params.b = parseFloat(e.target.value));
+        document.getElementById('p-eps').addEventListener('input', e => params.epsilon = parseFloat(e.target.value));
+
+        document.getElementById('btn-reset').addEventListener('click', () => {
+            // Clear textures
+            gl.bindFramebuffer(gl.FRAMEBUFFER, fbo);
+            gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, texA, 0);
+            gl.clearColor(0, 0, 0, 0);
+            gl.clear(gl.COLOR_BUFFER_BIT);
+            gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, texB, 0);
+            gl.clear(gl.COLOR_BUFFER_BIT);
+        });
+
+        document.getElementById('btn-spark').addEventListener('click', () => {
+            // Random position on the edge
+            const angle = Math.random() * Math.PI * 2;
+            const r = 0.45; // Slightly inside the edge
+            clickPos = {
+                x: 0.5 + r * Math.cos(angle),
+                y: 0.5 + r * Math.sin(angle)
+            };
+            isClicking = true;
+            setTimeout(() => isClicking = false, 100);
+        });
+
+        // Mouse Interaction
+        canvas.addEventListener('mousedown', e => {
+            isClicking = true;
+            updateClick(e);
+        });
+        canvas.addEventListener('mousemove', e => {
+            if (isClicking) updateClick(e);
+        });
+        window.addEventListener('mouseup', () => isClicking = false);
+
+        function updateClick(e) {
+            const rect = canvas.getBoundingClientRect();
+            clickPos.x = (e.clientX - rect.left) / rect.width;
+            clickPos.y = 1.0 - (e.clientY - rect.top) / rect.height;
+        }
+
+        // Loop
+        let lastTime = 0;
+        let frames = 0;
+        let lastFpsTime = 0;
+
+        function render(time) {
+            // FPS
+            frames++;
+            if (time - lastFpsTime >= 1000) {
+                document.getElementById('fps').innerText = `FPS: ${frames}`;
+                frames = 0;
+                lastFpsTime = time;
+            }
+
+            // Simulation Step (run multiple times per frame for speed)
+            gl.useProgram(simProgram);
+            gl.bindFramebuffer(gl.FRAMEBUFFER, fbo);
+
+            const posLoc = gl.getAttribLocation(simProgram, 'position');
+            gl.enableVertexAttribArray(posLoc);
+            gl.bindBuffer(gl.ARRAY_BUFFER, positionBuffer);
+            gl.vertexAttribPointer(posLoc, 2, gl.FLOAT, false, 0, 0);
+
+            gl.uniform2f(gl.getUniformLocation(simProgram, 'u_res'), texSize, texSize);
+            gl.uniform1f(gl.getUniformLocation(simProgram, 'u_dt'), params.dt);
+            gl.uniform1f(gl.getUniformLocation(simProgram, 'u_a'), params.a);
+            gl.uniform1f(gl.getUniformLocation(simProgram, 'u_b'), params.b);
+            gl.uniform1f(gl.getUniformLocation(simProgram, 'u_eps'), params.epsilon);
+
+            // Interaction
+            gl.uniform2f(gl.getUniformLocation(simProgram, 'u_click'), clickPos.x, clickPos.y);
+            gl.uniform1f(gl.getUniformLocation(simProgram, 'u_click_active'), isClicking ? 1.0 : 0.0);
+
+            for (let i = 0; i < 10; i++) {
+                gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, backTex, 0);
+                gl.bindTexture(gl.TEXTURE_2D, frontTex);
+                gl.drawArrays(gl.TRIANGLES, 0, 6);
+
+                // Swap
+                let temp = frontTex;
+                frontTex = backTex;
+                backTex = temp;
+            }
+
+            // Draw Step
+            gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+            gl.viewport(0, 0, canvas.width, canvas.height);
+            gl.useProgram(drawProgram);
+
+            gl.bindTexture(gl.TEXTURE_2D, frontTex);
+            gl.uniform2f(gl.getUniformLocation(drawProgram, 'u_res'), canvas.width, canvas.height);
+
+            const posLocDraw = gl.getAttribLocation(drawProgram, 'position');
+            gl.enableVertexAttribArray(posLocDraw);
+            gl.bindBuffer(gl.ARRAY_BUFFER, positionBuffer);
+            gl.vertexAttribPointer(posLocDraw, 2, gl.FLOAT, false, 0, 0);
+
+            gl.drawArrays(gl.TRIANGLES, 0, 6);
+
+            requestAnimationFrame(render);
+        }
+
+        requestAnimationFrame(render);
+
+    </script>
+</body>
+
+</html>
