@@ -71,6 +71,24 @@
             font-family: monospace;
             color: #666;
         }
+
+        #debug-console {
+            position: absolute;
+            bottom: 0;
+            left: 0;
+            width: 100%;
+            height: 150px;
+            background: rgba(0, 0, 0, 0.8);
+            color: #0f0;
+            font-family: monospace;
+            font-size: 10px;
+            overflow-y: scroll;
+            padding: 5px;
+            box-sizing: border-box;
+            z-index: 9999;
+            pointer-events: none;
+            /* Let clicks pass through */
+        }
     </style>
 </head>
 
@@ -109,6 +127,49 @@
     </div>
     <div id="fps">FPS: 0</div>
     <canvas id="canvas"></canvas>
+
+    <div id="debug-console"></div>
+
+    <script>
+        // On-screen debug console
+        (function () {
+            const debugDiv = document.getElementById('debug-console');
+            function log(msg, color) {
+                const line = document.createElement('div');
+                line.style.color = color || '#ccc';
+                line.textContent = '>' + msg;
+                debugDiv.appendChild(line);
+                debugDiv.scrollTop = debugDiv.scrollHeight;
+            }
+
+            // Capture Errors
+            window.onerror = function (msg, source, lineno, colno, error) {
+                log(`ERR: ${msg} @ ${lineno}:${colno}`, '#ff5555');
+                return false;
+            };
+
+            // Capture Console
+            const oldLog = console.log;
+            console.log = function (...args) {
+                oldLog.apply(console, args);
+                log(args.join(' '), '#88ff88');
+            };
+
+            const oldWarn = console.warn;
+            console.warn = function (...args) {
+                oldWarn.apply(console, args);
+                log('WARN: ' + args.join(' '), '#ffff55');
+            };
+
+            const oldErr = console.error;
+            console.error = function (...args) {
+                oldErr.apply(console, args);
+                log('ERR: ' + args.join(' '), '#ff5555');
+            };
+
+            log('Debug console active.');
+        })();
+    </script>
 
     <script>
         const canvas = document.getElementById('canvas');
@@ -355,10 +416,28 @@
         });
         window.addEventListener('mouseup', () => isClicking = false);
 
+        // Touch Interaction
+        canvas.addEventListener('touchstart', e => {
+            e.preventDefault(); // Prevent scrolling
+            isClicking = true;
+            updateTouch(e.touches[0]);
+        }, { passive: false });
+        canvas.addEventListener('touchmove', e => {
+            e.preventDefault(); // Prevent scrolling
+            if (isClicking) updateTouch(e.touches[0]);
+        }, { passive: false });
+        window.addEventListener('touchend', () => isClicking = false);
+
         function updateClick(e) {
             const rect = canvas.getBoundingClientRect();
             clickPos.x = (e.clientX - rect.left) / rect.width;
             clickPos.y = 1.0 - (e.clientY - rect.top) / rect.height;
+        }
+
+        function updateTouch(touch) {
+            const rect = canvas.getBoundingClientRect();
+            clickPos.x = (touch.clientX - rect.left) / rect.width;
+            clickPos.y = 1.0 - (touch.clientY - rect.top) / rect.height;
         }
 
         // Loop
