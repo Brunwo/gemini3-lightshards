@@ -349,8 +349,10 @@
             const tex = gl.createTexture();
             gl.bindTexture(gl.TEXTURE_2D, tex);
             // Initialize with zeros to avoid lazy init warning
-            const data = new Float32Array(texSize * texSize * 4);
-            gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, texSize, texSize, 0, gl.RGBA, gl.FLOAT, data);
+            const useFloat = !!ext1;
+            const data = useFloat ? new Float32Array(texSize * texSize * 4) : new Uint8Array(texSize * texSize * 4);
+            const type = useFloat ? gl.FLOAT : gl.UNSIGNED_BYTE;
+            gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, texSize, texSize, 0, gl.RGBA, type, data);
 
             // Use NEAREST to avoid "texture not filterable" warnings on devices without OES_texture_float_linear
             gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST);
@@ -408,11 +410,15 @@
 
         // Mouse Interaction
         canvas.addEventListener('mousedown', e => {
+            e.preventDefault();
             isClicking = true;
             updateClick(e);
         });
         canvas.addEventListener('mousemove', e => {
-            if (isClicking) updateClick(e);
+            if (isClicking) {
+                e.preventDefault();
+                updateClick(e);
+            }
         });
         window.addEventListener('mouseup', () => isClicking = false);
 
