@@ -187,10 +187,11 @@
 
         if (!gl) alert('WebGL not supported');
 
-        // Check float texture support
-        const ext1 = gl.getExtension('OES_texture_float');
-        const ext2 = gl.getExtension('WEBGL_color_buffer_float');
-        if (!ext1) console.warn('Float textures not supported');
+        // Check texture support
+        const extFloat = gl.getExtension('OES_texture_float');
+        const extHalf = gl.getExtension('OES_texture_half_float');
+        const extColorFloat = gl.getExtension('WEBGL_color_buffer_float');
+        if (!extFloat && !extHalf) console.warn('High precision textures not supported, using byte textures');
 
         // --- Shaders ---
 
@@ -349,9 +350,11 @@
             const tex = gl.createTexture();
             gl.bindTexture(gl.TEXTURE_2D, tex);
             // Initialize with zeros to avoid lazy init warning
-            const useFloat = !!ext1;
-            const data = useFloat ? new Float32Array(texSize * texSize * 4) : new Uint8Array(texSize * texSize * 4);
-            const type = useFloat ? gl.FLOAT : gl.UNSIGNED_BYTE;
+            const useFloat = !!extFloat;
+            const useHalf = !useFloat && !!extHalf;
+            const useByte = !useFloat && !useHalf;
+            const data = useFloat ? new Float32Array(texSize * texSize * 4) : useHalf ? new Uint16Array(texSize * texSize * 4) : new Uint8Array(texSize * texSize * 4);
+            const type = useFloat ? gl.FLOAT : useHalf ? gl.HALF_FLOAT_OES : gl.UNSIGNED_BYTE;
             gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, texSize, texSize, 0, gl.RGBA, type, data);
 
             // Use NEAREST to avoid "texture not filterable" warnings on devices without OES_texture_float_linear
